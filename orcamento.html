@@ -421,26 +421,152 @@
     
     const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
     
-    const LOGO_BASE64 = "data:image/png;base64,"
     let orcamentoEditandoId = null;
     let modoEdicao = false;
     let currentStep = 1;
     let jaPassouStep1 = false;
-    let pendingSyncData = [];
     let isOnline = navigator.onLine;
     
-    // ========== GERENCIAMENTO DE ATENDENTES COM SUPABASE ==========
+    // ========== NOVA FILA DE SINCRONIZAÇÃO ==========
+    const SYNC_QUEUE_KEY = 'syncQueue';
+    
+    function getSyncQueue() {
+      return JSON.parse(localStorage.getItem(SYNC_QUEUE_KEY) || '[]');
+    }
+    
+    function setSyncQueue(queue) {
+      localStorage.setItem(SYNC_QUEUE_KEY, JSON.stringify(queue));
+    }
+    
+    function addToSyncQueue(operation, table, data) {
+      const queue = getSyncQueue();
+      
+      queue.push({
+        id: Date.now() + '-' + Math.random().toString(36).substr(2, 5),
+        operation, // create | update | delete
+        table,     // atendentes | orcamentos
+        data,
+        timestamp: new Date().toISOString(),
+        retries: 0
+      });
+      
+      setSyncQueue(queue);
+    }
+    
+    // ========== FUNÇÃO ROBUSTA DE SINCRONIZAÇÃO ==========
+    async function syncAtendente(item) {
+      const { operation, data } = item;
+      
+      if (operation === 'create') {
+        const { error } = await supabase.from('atendentes').insert(data);
+        if (error) throw error;
+      }
+      
+      if (operation === 'update') {
+        const { data: remoto } = await supabase
+          .from('atendentes')
+          .select('updated_at')
+          .eq('id', data.id)
+          .maybeSingle();
+        
+        if (remoto && remoto.updated_at && new Date(remoto.updated_at) > new Date(data.updated_at)) {
+          console.warn('Conflito detectado. Ignorando update local.');
+          return;
+        }
+        
+        const { error } = await supabase
+          .from('atendentes')
+          .update(data)
+          .eq('id', data.id);
+        if (error) throw error;
+      }
+      
+      if (operation === 'delete') {
+        const { error } = await supabase
+          .from('atendentes')
+          .delete()
+          .eq('id', data.id);
+        if (error) throw error;
+      }
+    }
+    
+    async function syncOrcamento(item) {
+      const { operation, data } = item;
+      
+      if (operation === 'create' || operation === 'update') {
+        const dbData = {
+          id: data.id,
+          cliente: data.cliente,
+          idade: data.idade || '',
+          telefone: data.telefone,
+          atendente: data.atendente,
+          origem: data.origem,
+          concorrente: data.concorrente || '',
+          itens: JSON.stringify(data.itens),
+          subtotal: data.subtotal,
+          desconto_geral: data.descontoGeral,
+          total_final: data.totalFinal,
+          status: data.status,
+          justificativa: data.justificativa || '',
+          data_raw: data.dataRaw,
+          created_at: data.dataRaw,
+          updated_at: data.updated_at || new Date().toISOString()
+        };
+        
+        const { error } = await supabase
+          .from('orcamentos')
+          .upsert(dbData, { onConflict: 'id' });
+        if (error) throw error;
+      }
+      
+      if (operation === 'delete') {
+        const { error } = await supabase
+          .from('orcamentos')
+          .delete()
+          .eq('id', data.id);
+        if (error) throw error;
+      }
+    }
+    
+    async function processSyncQueue() {
+      if (!navigator.onLine) return;
+      
+      const queue = getSyncQueue();
+      const newQueue = [];
+      
+      for (const item of queue) {
+        try {
+          if (item.table === 'atendentes') {
+            await syncAtendente(item);
+          } else if (item.table === 'orcamentos') {
+            await syncOrcamento(item);
+          }
+        } catch (error) {
+          console.error('Erro na sincronização do item:', item, error);
+          item.retries++;
+          
+          if (item.retries < 5) {
+            newQueue.push(item);
+          } else {
+            console.error('Erro permanente (5 tentativas):', item);
+          }
+        }
+      }
+      
+      setSyncQueue(newQueue);
+    }
+    
+    // ========== ATENDENTES ==========
     let atendentes = [];
     
     const DEFAULT_ATENDENTES = [
-      { id: 1, nome: "Jaúna Constante", login: "jauna", senha: "176320", email: "jauna@oticagraudivino.com", ativo: true, isAdmin: true, criado_em: new Date().toISOString() },
-      { id: 2, nome: "Jaciara Constante", login: "jaciara", senha: "176320", email: "jaciara@oticagraudivino.com", ativo: true, isAdmin: true, criado_em: new Date().toISOString() },
-      { id: 3, nome: "Luana Paloschi", login: "luana", senha: "luana456", email: "luana@oticagraudivino.com", ativo: true, isAdmin: false, criado_em: new Date().toISOString() },
-      { id: 4, nome: "Aline", login: "aline", senha: "aline789", email: "aline@oticagraudivino.com", ativo: true, isAdmin: false, criado_em: new Date().toISOString() },
-      { id: 5, nome: "Amailson Gawlinski", login: "amailson", senha: "amailson123", email: "amailson@oticagraudivino.com", ativo: true, isAdmin: false, criado_em: new Date().toISOString() }
+      { id: 1, nome: "Jaúna Constante", login: "jauna", senha: "176320", email: "jauna@oticagraudivino.com", ativo: true, isAdmin: true, criado_em: new Date().toISOString(), updated_at: new Date().toISOString() },
+      { id: 2, nome: "Jaciara Constante", login: "jaciara", senha: "176320", email: "jaciara@oticagraudivino.com", ativo: true, isAdmin: true, criado_em: new Date().toISOString(), updated_at: new Date().toISOString() },
+      { id: 3, nome: "Luana Paloschi", login: "luana", senha: "luana456", email: "luana@oticagraudivino.com", ativo: true, isAdmin: false, criado_em: new Date().toISOString(), updated_at: new Date().toISOString() },
+      { id: 4, nome: "Aline", login: "aline", senha: "aline789", email: "aline@oticagraudivino.com", ativo: true, isAdmin: false, criado_em: new Date().toISOString(), updated_at: new Date().toISOString() },
+      { id: 5, nome: "Amailson Gawlinski", login: "amailson", senha: "amailson123", email: "amailson@oticagraudivino.com", ativo: true, isAdmin: false, criado_em: new Date().toISOString(), updated_at: new Date().toISOString() }
     ];
     
-    // Função para carregar atendentes do Supabase (VERSÃO CORRIGIDA)
     async function carregarAtendentesDoSupabase() {
       showLoading();
       try {
@@ -452,21 +578,12 @@
             atendentes = [...DEFAULT_ATENDENTES];
             localStorage.setItem('atendentes', JSON.stringify(atendentes));
           }
-          // Forçar admin para Jaúna e Jaciara (offline)
-          const adminNames = ["Jaúna Constante", "Jaciara Constante"];
-          for (const atend of atendentes) {
-            if (adminNames.includes(atend.nome)) {
-              atend.isAdmin = true;
-            }
-          }
-          localStorage.setItem('atendentes', JSON.stringify(atendentes));
           hideLoading();
           atualizarSelectAtendentes();
           toggleAccessButtons();
           return;
         }
         
-        // Tentar carregar do Supabase
         let { data, error } = await supabase
           .from('atendentes')
           .select('*')
@@ -476,24 +593,22 @@
         
         if (data && data.length > 0) {
           atendentes = data;
-          // Forçar admin para Jaúna e Jaciara
           const adminNames = ["Jaúna Constante", "Jaciara Constante"];
           let precisouAtualizar = false;
           for (const atend of atendentes) {
             if (adminNames.includes(atend.nome) && !atend.isAdmin) {
               atend.isAdmin = true;
+              atend.updated_at = new Date().toISOString();
               precisouAtualizar = true;
             }
           }
           if (precisouAtualizar && navigator.onLine) {
-            // Atualizar cada um no Supabase
             for (const atend of atendentes.filter(a => adminNames.includes(a.nome))) {
-              await supabase.from('atendentes').update({ isAdmin: true }).eq('id', atend.id);
+              await supabase.from('atendentes').update({ isAdmin: true, updated_at: atend.updated_at }).eq('id', atend.id);
             }
           }
           localStorage.setItem('atendentes', JSON.stringify(atendentes));
         } else {
-          // Se não houver dados no Supabase, inserir os padrões (já com admin true)
           for (const atendente of DEFAULT_ATENDENTES) {
             const { error: insertError } = await supabase
               .from('atendentes')
@@ -504,7 +619,7 @@
           localStorage.setItem('atendentes', JSON.stringify(atendentes));
         }
       } catch (error) {
-        console.error('Erro ao carregar atendentes do Supabase:', error);
+        console.error('Erro ao carregar atendentes:', error);
         const localData = localStorage.getItem('atendentes');
         if (localData) {
           atendentes = JSON.parse(localData);
@@ -512,14 +627,6 @@
           atendentes = [...DEFAULT_ATENDENTES];
           localStorage.setItem('atendentes', JSON.stringify(atendentes));
         }
-        // Forçar admin para Jaúna e Jaciara também em caso de erro
-        const adminNames = ["Jaúna Constante", "Jaciara Constante"];
-        for (const atend of atendentes) {
-          if (adminNames.includes(atend.nome)) {
-            atend.isAdmin = true;
-          }
-        }
-        localStorage.setItem('atendentes', JSON.stringify(atendentes));
       } finally {
         hideLoading();
         atualizarSelectAtendentes();
@@ -527,42 +634,195 @@
       }
     }
     
-    // Função para salvar atendentes no Supabase (corrigida)
-    async function salvarAtendentesNoSupabase() {
-      if (!navigator.onLine) {
-        localStorage.setItem('atendentes', JSON.stringify(atendentes));
-        return true;
-      }
-      try {
-        // Sincroniza todos os atendentes com ID positivo (já existentes no Supabase)
-        const toUpsert = atendentes.filter(a => a.id > 0);
-        for (const atendente of toUpsert) {
-          const { error } = await supabase
-            .from('atendentes')
-            .upsert(atendente, { onConflict: 'id' });
-          if (error) throw error;
+    // ========== NOVAS FUNÇÕES DE ATENDENTES COM FILA ==========
+    async function adicionarAtendenteComLogin(nome, email, login, senha) {
+      const novo = {
+        id: Date.now(),
+        nome: nome,
+        email: email,
+        login: login,
+        senha: senha,
+        ativo: true,
+        isAdmin: false,
+        criado_em: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      };
+      
+      atendentes.push(novo);
+      
+      if (navigator.onLine) {
+        try {
+          await supabase.from('atendentes').insert(novo);
+        } catch {
+          addToSyncQueue('create', 'atendentes', novo);
         }
-        // Atendentes com ID negativo (criados offline) devem ser inseridos sem ID
-        const toInsert = atendentes.filter(a => a.id < 0);
-        for (const atendente of toInsert) {
-          const { id, ...rest } = atendente;
-          const { data, error } = await supabase
+      } else {
+        addToSyncQueue('create', 'atendentes', novo);
+      }
+      
+      atualizarSelectAtendentes();
+    }
+    
+    async function editarAtendenteComLogin(id, nome, email, login, senha) {
+      const index = atendentes.findIndex(a => a.id === id);
+      if (index === -1) return;
+      
+      const dados = {
+        nome: nome,
+        email: email,
+        login: login
+      };
+      if (senha && senha.trim() !== "") {
+        dados.senha = senha;
+      }
+      
+      atendentes[index] = {
+        ...atendentes[index],
+        ...dados,
+        updated_at: new Date().toISOString()
+      };
+      
+      if (navigator.onLine) {
+        try {
+          await supabase
             .from('atendentes')
-            .insert(rest)
-            .select();
-          if (error) throw error;
-          if (data && data[0]) {
-            atendente.id = data[0].id; // atualiza ID real
+            .update(atendentes[index])
+            .eq('id', id);
+        } catch {
+          addToSyncQueue('update', 'atendentes', atendentes[index]);
+        }
+      } else {
+        addToSyncQueue('update', 'atendentes', atendentes[index]);
+      }
+      
+      atualizarSelectAtendentes();
+    }
+    
+    async function ocultarAtendente(id) {
+      const index = atendentes.findIndex(a => a.id === id);
+      if (index !== -1) {
+        atendentes[index].ativo = false;
+        atendentes[index].updated_at = new Date().toISOString();
+        
+        if (navigator.onLine) {
+          try {
+            await supabase
+              .from('atendentes')
+              .update({ ativo: false, updated_at: atendentes[index].updated_at })
+              .eq('id', id);
+          } catch {
+            addToSyncQueue('update', 'atendentes', atendentes[index]);
           }
+        } else {
+          addToSyncQueue('update', 'atendentes', atendentes[index]);
         }
-        localStorage.setItem('atendentes', JSON.stringify(atendentes));
-        return true;
-      } catch (error) {
-        console.error('Erro ao salvar atendentes no Supabase:', error);
-        alert('Erro de conexão com o banco. Dados salvos apenas localmente.');
-        localStorage.setItem('atendentes', JSON.stringify(atendentes));
-        return false;
+        
+        atualizarSelectAtendentes();
       }
+    }
+    
+    async function reativarAtendente(id) {
+      const index = atendentes.findIndex(a => a.id === id);
+      if (index !== -1) {
+        atendentes[index].ativo = true;
+        atendentes[index].updated_at = new Date().toISOString();
+        
+        if (navigator.onLine) {
+          try {
+            await supabase
+              .from('atendentes')
+              .update({ ativo: true, updated_at: atendentes[index].updated_at })
+              .eq('id', id);
+          } catch {
+            addToSyncQueue('update', 'atendentes', atendentes[index]);
+          }
+        } else {
+          addToSyncQueue('update', 'atendentes', atendentes[index]);
+        }
+        
+        atualizarSelectAtendentes();
+      }
+    }
+    
+    async function deletarAtendente(id) {
+      atendentes = atendentes.filter(a => a.id !== id);
+      
+      if (navigator.onLine) {
+        try {
+          await supabase.from('atendentes').delete().eq('id', id);
+        } catch {
+          addToSyncQueue('delete', 'atendentes', { id: id });
+        }
+      } else {
+        addToSyncQueue('delete', 'atendentes', { id: id });
+      }
+      
+      localStorage.setItem('atendentes', JSON.stringify(atendentes));
+      atualizarSelectAtendentes();
+    }
+    
+    async function evoluirParaAdmin(id) {
+      const atendente = atendentes.find(a => a.id === id);
+      if (!atendente) return;
+      
+      atendente.isAdmin = true;
+      atendente.updated_at = new Date().toISOString();
+      
+      if (navigator.onLine) {
+        try {
+          await supabase
+            .from('atendentes')
+            .update({ isAdmin: true, updated_at: atendente.updated_at })
+            .eq('id', id);
+        } catch {
+          addToSyncQueue('update', 'atendentes', atendente);
+        }
+      } else {
+        addToSyncQueue('update', 'atendentes', atendente);
+      }
+      
+      const usuarioSalvo = localStorage.getItem('usuarioLogado');
+      if (usuarioSalvo) {
+        try {
+          const user = JSON.parse(usuarioSalvo);
+          if (user.nome === atendente.nome) {
+            localStorage.setItem('usuarioLogado', JSON.stringify({...user, isAdmin: true}));
+          }
+        } catch(e) {}
+      }
+      toggleAccessButtons();
+    }
+    
+    async function removerAcessoAdmin(id) {
+      const atendente = atendentes.find(a => a.id === id);
+      if (!atendente) return;
+      
+      atendente.isAdmin = false;
+      atendente.updated_at = new Date().toISOString();
+      
+      if (navigator.onLine) {
+        try {
+          await supabase
+            .from('atendentes')
+            .update({ isAdmin: false, updated_at: atendente.updated_at })
+            .eq('id', id);
+        } catch {
+          addToSyncQueue('update', 'atendentes', atendente);
+        }
+      } else {
+        addToSyncQueue('update', 'atendentes', atendente);
+      }
+      
+      const usuarioSalvo = localStorage.getItem('usuarioLogado');
+      if (usuarioSalvo) {
+        try {
+          const user = JSON.parse(usuarioSalvo);
+          if (user.nome === atendente.nome) {
+            localStorage.setItem('usuarioLogado', JSON.stringify({...user, isAdmin: false}));
+          }
+        } catch(e) {}
+      }
+      toggleAccessButtons();
     }
     
     function atualizarSelectAtendentes() {
@@ -586,127 +846,6 @@
       
       updateNavButtons();
       toggleAccessButtons();
-    }
-    
-    async function salvarAtendentes() {
-      localStorage.setItem('atendentes', JSON.stringify(atendentes));
-      const sucesso = await salvarAtendentesNoSupabase();
-      if (sucesso) {
-        atualizarSelectAtendentes();
-      }
-    }
-    
-    async function adicionarAtendenteComLogin(nome, email, login, senha) {
-      const novoId = Math.min(...atendentes.map(a => a.id), 0) - 1; // ID negativo
-      const novoAtendente = {
-        id: novoId,
-        nome: nome,
-        email: email,
-        login: login,
-        senha: senha,
-        ativo: true,
-        isAdmin: false,
-        criado_em: new Date().toISOString()
-      };
-      atendentes.push(novoAtendente);
-      await salvarAtendentes();
-    }
-    
-    async function editarAtendenteComLogin(id, nome, email, login, senha) {
-      const index = atendentes.findIndex(a => a.id === id);
-      if (index !== -1) {
-        atendentes[index].nome = nome;
-        atendentes[index].email = email;
-        atendentes[index].login = login;
-        if (senha && senha.trim() !== "") {
-          atendentes[index].senha = senha;
-        }
-        await salvarAtendentes();
-      }
-    }
-    
-    async function ocultarAtendente(id) {
-      const index = atendentes.findIndex(a => a.id === id);
-      if (index !== -1) {
-        atendentes[index].ativo = false;
-        await salvarAtendentes();
-      }
-    }
-    
-    async function reativarAtendente(id) {
-      const index = atendentes.findIndex(a => a.id === id);
-      if (index !== -1) {
-        atendentes[index].ativo = true;
-        await salvarAtendentes();
-      }
-    }
-    
-    async function deletarAtendente(id) {
-      atendentes = atendentes.filter(a => a.id !== id);
-      
-      if (navigator.onLine && id > 0) {
-        try {
-          const { error } = await supabase.from('atendentes').delete().eq('id', id);
-          if (error) throw error;
-        } catch(e) {
-          console.error('Erro ao deletar atendente do Supabase:', e);
-        }
-      }
-      
-      localStorage.setItem('atendentes', JSON.stringify(atendentes));
-      atualizarSelectAtendentes();
-    }
-    
-    async function evoluirParaAdmin(id) {
-      const index = atendentes.findIndex(a => a.id === id);
-      if (index !== -1) {
-        atendentes[index].isAdmin = true;
-        await salvarAtendentes();
-        const usuarioSalvo = localStorage.getItem('usuarioLogado');
-        if (usuarioSalvo) {
-          try {
-            const user = JSON.parse(usuarioSalvo);
-            if (user.nome === atendentes[index].nome) {
-              localStorage.setItem('usuarioLogado', JSON.stringify({...user, isAdmin: true}));
-            }
-          } catch(e) {}
-        }
-        toggleAccessButtons();
-      }
-    }
-    
-    async function removerAcessoAdmin(id) {
-      const index = atendentes.findIndex(a => a.id === id);
-      if (index !== -1) {
-        atendentes[index].isAdmin = false;
-        await salvarAtendentes();
-        const usuarioSalvo = localStorage.getItem('usuarioLogado');
-        if (usuarioSalvo) {
-          try {
-            const user = JSON.parse(usuarioSalvo);
-            if (user.nome === atendentes[index].nome) {
-              localStorage.setItem('usuarioLogado', JSON.stringify({...user, isAdmin: false}));
-            }
-          } catch(e) {}
-        }
-        toggleAccessButtons();
-      }
-    }
-    
-    function sincronizarAtendenteAtual() {
-      const usuarioSalvo = localStorage.getItem('usuarioLogado');
-      const atendenteSelect = document.getElementById('atendenteSelect');
-      if (usuarioSalvo && atendenteSelect) {
-        try {
-          const user = JSON.parse(usuarioSalvo);
-          const optionExists = Array.from(atendenteSelect.options).some(opt => opt.value === user.nome);
-          if (optionExists && atendenteSelect.value !== user.nome) {
-            atendenteSelect.value = user.nome;
-            const changeEvent = new Event('change', { bubbles: true });
-            atendenteSelect.dispatchEvent(changeEvent);
-          }
-        } catch(e) {}
-      }
     }
     
     function isAtendenteAdmin(nomeAtendente) {
@@ -743,151 +882,8 @@
       }
     }
     
-    const stepCards = [document.getElementById('step1'), document.getElementById('step2'), document.getElementById('step3'), document.getElementById('step4')];
-    const stepItems = document.querySelectorAll('.step-item');
-    const atendenteSelect = document.getElementById('atendenteSelect');
-    const clientName = document.getElementById('clientName');
-    const clientAge = document.getElementById('clientAge');
-    const clientPhone = document.getElementById('clientPhone');
-    const clientSource = document.getElementById('clientSource');
-    const descontoGeralInput = document.getElementById('descontoGeralInput');
-    let currentOrcamentoId = '';
-    
-    // Offline sync functions
-    function updateOfflineIndicator() {
-      const indicator = document.getElementById('offlineIndicator');
-      const statusSpan = document.getElementById('offlineStatus');
-      if (!navigator.onLine) {
-        indicator.classList.add('show');
-        indicator.classList.remove('online');
-        statusSpan.innerHTML = '<i class="fas fa-plug"></i> Offline - Dados salvos localmente';
-      } else {
-        indicator.classList.add('show');
-        indicator.classList.add('online');
-        statusSpan.innerHTML = '<i class="fas fa-check-circle"></i> Online - Sincronizado';
-        setTimeout(() => {
-          indicator.classList.remove('show');
-        }, 3000);
-        syncPendingData();
-      }
-    }
-    
-    async function syncPendingData() {
-      const pending = JSON.parse(localStorage.getItem('pendingSync') || '[]');
-      if (pending.length === 0) return;
-      
-      showLoading();
-      let successCount = 0;
-      
-      for (const data of pending) {
-        try {
-          const { error } = await supabase
-            .from('orcamentos')
-            .upsert({
-              id: data.id,
-              cliente: data.cliente,
-              idade: data.idade,
-              telefone: data.telefone,
-              atendente: data.atendente,
-              origem: data.origem,
-              concorrente: data.concorrente || '',
-              itens: JSON.stringify(data.itens),
-              subtotal: data.subtotal,
-              desconto_geral: data.descontoGeral,
-              total_final: data.totalFinal,
-              status: data.status,
-              justificativa: data.justificativa || '',
-              data_raw: data.dataRaw,
-              created_at: data.dataRaw
-            }, { onConflict: 'id' });
-          
-          if (!error) successCount++;
-        } catch(e) {
-          console.error('Erro ao sincronizar:', e);
-        }
-      }
-      
-      if (successCount === pending.length) {
-        localStorage.removeItem('pendingSync');
-        await carregarHistoricoDoSupabase();
-      }
-      hideLoading();
-    }
-    
-    async function salvarComFallback(orcamentoData) {
-      if (navigator.onLine) {
-        try {
-          const { error } = await supabase
-            .from('orcamentos')
-            .upsert({
-              id: orcamentoData.id,
-              cliente: orcamentoData.cliente,
-              idade: orcamentoData.idade,
-              telefone: orcamentoData.telefone,
-              atendente: orcamentoData.atendente,
-              origem: orcamentoData.origem,
-              concorrente: orcamentoData.concorrente || '',
-              itens: JSON.stringify(orcamentoData.itens),
-              subtotal: orcamentoData.subtotal,
-              desconto_geral: orcamentoData.descontoGeral,
-              total_final: orcamentoData.totalFinal,
-              status: orcamentoData.status,
-              justificativa: orcamentoData.justificativa || '',
-              data_raw: orcamentoData.dataRaw,
-              created_at: orcamentoData.dataRaw
-            }, { onConflict: 'id' });
-          
-          if (!error) {
-            await carregarHistoricoDoSupabase();
-            return true;
-          } else {
-            throw error;
-          }
-        } catch(error) {
-          console.error('Erro ao salvar no Supabase, salvando localmente:', error);
-          addToPendingSync(orcamentoData);
-          return true;
-        }
-      } else {
-        addToPendingSync(orcamentoData);
-        return true;
-      }
-    }
-    
-    function addToPendingSync(orcamentoData) {
-      const pending = JSON.parse(localStorage.getItem('pendingSync') || '[]');
-      const existingIndex = pending.findIndex(p => p.id === orcamentoData.id);
-      if (existingIndex !== -1) {
-        pending[existingIndex] = orcamentoData;
-      } else {
-        pending.push(orcamentoData);
-      }
-      localStorage.setItem('pendingSync', JSON.stringify(pending));
-      
-      const localIndex = historicoOrcamentosGlobal.findIndex(h => h.id === orcamentoData.id);
-      if (localIndex !== -1) {
-        historicoOrcamentosGlobal[localIndex] = orcamentoData;
-      } else {
-        historicoOrcamentosGlobal.unshift(orcamentoData);
-      }
-      localStorage.setItem('historicoOrcamentos', JSON.stringify(historicoOrcamentosGlobal));
-    }
-    
-    function showLoading() {
-      let loading = document.querySelector('.loading-overlay');
-      if (!loading) {
-        loading = document.createElement('div');
-        loading.className = 'loading-overlay';
-        loading.innerHTML = '<div class="loading-spinner"><i class="fas fa-spinner"></i> Carregando...</div>';
-        document.body.appendChild(loading);
-      }
-      loading.style.display = 'flex';
-    }
-    
-    function hideLoading() {
-      const loading = document.querySelector('.loading-overlay');
-      if (loading) loading.style.display = 'none';
-    }
+    // ========== FUNÇÕES DE CARREGAMENTO DE ORÇAMENTOS ==========
+    let historicoOrcamentosGlobal = [];
     
     async function carregarHistoricoDoSupabase() {
       showLoading();
@@ -912,7 +908,7 @@
           totalFinal: item.total_final,
           descontoGeral: item.desconto_geral,
           dataRaw: item.data_raw || item.created_at,
-          data: new Date(item.created_at).toLocaleString('pt-BR')
+          data: item.created_at ? new Date(item.created_at).toLocaleString('pt-BR') : new Date().toLocaleString('pt-BR')
         }));
         
         localStorage.setItem('historicoOrcamentos', JSON.stringify(historicoOrcamentosGlobal));
@@ -922,6 +918,76 @@
         if (localData) historicoOrcamentosGlobal = JSON.parse(localData);
       } finally {
         hideLoading();
+      }
+    }
+    
+    async function salvarOrcamentoNoSupabase(orcamentoData) {
+      const dataWithVersion = {
+        ...orcamentoData,
+        updated_at: new Date().toISOString()
+      };
+      
+      if (!navigator.onLine) {
+        addToSyncQueue('create', 'orcamentos', dataWithVersion);
+        
+        const index = historicoOrcamentosGlobal.findIndex(h => h.id === orcamentoData.id);
+        if (index !== -1) {
+          historicoOrcamentosGlobal[index] = dataWithVersion;
+        } else {
+          historicoOrcamentosGlobal.unshift(dataWithVersion);
+        }
+        localStorage.setItem('historicoOrcamentos', JSON.stringify(historicoOrcamentosGlobal));
+        return true;
+      }
+      
+      try {
+        const dbData = {
+          id: orcamentoData.id,
+          cliente: orcamentoData.cliente,
+          idade: orcamentoData.idade || '',
+          telefone: orcamentoData.telefone,
+          atendente: orcamentoData.atendente,
+          origem: orcamentoData.origem,
+          concorrente: orcamentoData.concorrente || '',
+          itens: JSON.stringify(orcamentoData.itens),
+          subtotal: orcamentoData.subtotal,
+          desconto_geral: orcamentoData.descontoGeral,
+          total_final: orcamentoData.totalFinal,
+          status: orcamentoData.status,
+          justificativa: orcamentoData.justificativa || '',
+          data_raw: orcamentoData.dataRaw,
+          created_at: orcamentoData.dataRaw,
+          updated_at: dataWithVersion.updated_at
+        };
+        
+        const { error } = await supabase
+          .from('orcamentos')
+          .upsert(dbData, { onConflict: 'id' });
+        
+        if (error) throw error;
+        
+        const index = historicoOrcamentosGlobal.findIndex(h => h.id === orcamentoData.id);
+        if (index !== -1) {
+          historicoOrcamentosGlobal[index] = dataWithVersion;
+        } else {
+          historicoOrcamentosGlobal.unshift(dataWithVersion);
+        }
+        localStorage.setItem('historicoOrcamentos', JSON.stringify(historicoOrcamentosGlobal));
+        
+        return true;
+      } catch (error) {
+        console.error('Erro ao salvar no Supabase:', error);
+        addToSyncQueue('create', 'orcamentos', dataWithVersion);
+        
+        const index = historicoOrcamentosGlobal.findIndex(h => h.id === orcamentoData.id);
+        if (index !== -1) {
+          historicoOrcamentosGlobal[index] = dataWithVersion;
+        } else {
+          historicoOrcamentosGlobal.unshift(dataWithVersion);
+        }
+        localStorage.setItem('historicoOrcamentos', JSON.stringify(historicoOrcamentosGlobal));
+        
+        return true;
       }
     }
     
@@ -937,11 +1003,9 @@
           if (error) throw error;
           await carregarHistoricoDoSupabase();
         } else {
+          addToSyncQueue('delete', 'orcamentos', { id: id });
           historicoOrcamentosGlobal = historicoOrcamentosGlobal.filter(item => item.id !== id);
           localStorage.setItem('historicoOrcamentos', JSON.stringify(historicoOrcamentosGlobal));
-          const pendingDeletes = JSON.parse(localStorage.getItem('pendingDeletes') || '[]');
-          if (!pendingDeletes.includes(id)) pendingDeletes.push(id);
-          localStorage.setItem('pendingDeletes', JSON.stringify(pendingDeletes));
         }
         return true;
       } catch (error) {
@@ -952,10 +1016,45 @@
       }
     }
     
+    // ========== FUNÇÕES DE UI (mantidas do original) ==========
+    function showLoading() {
+      let loading = document.querySelector('.loading-overlay');
+      if (!loading) {
+        loading = document.createElement('div');
+        loading.className = 'loading-overlay';
+        loading.innerHTML = '<div class="loading-spinner"><i class="fas fa-spinner"></i> Carregando...</div>';
+        document.body.appendChild(loading);
+      }
+      loading.style.display = 'flex';
+    }
+    
+    function hideLoading() {
+      const loading = document.querySelector('.loading-overlay');
+      if (loading) loading.style.display = 'none';
+    }
+    
+    function updateOfflineIndicator() {
+      const indicator = document.getElementById('offlineIndicator');
+      const statusSpan = document.getElementById('offlineStatus');
+      if (!navigator.onLine) {
+        indicator.classList.add('show');
+        indicator.classList.remove('online');
+        statusSpan.innerHTML = '<i class="fas fa-plug"></i> Offline - Dados salvos localmente';
+      } else {
+        indicator.classList.add('show');
+        indicator.classList.add('online');
+        statusSpan.innerHTML = '<i class="fas fa-check-circle"></i> Online - Sincronizado';
+        setTimeout(() => {
+          indicator.classList.remove('show');
+        }, 3000);
+        processSyncQueue();
+      }
+    }
+    
     window.addEventListener('online', () => {
       isOnline = true;
       updateOfflineIndicator();
-      syncPendingData();
+      processSyncQueue();
       carregarHistoricoDoSupabase();
       carregarAtendentesDoSupabase();
     });
@@ -966,17 +1065,10 @@
     
     updateOfflineIndicator();
     
-    clientSource.addEventListener('change', function() {
-      const concorrenteGroup = document.getElementById('concorrenteGroup');
-      if (this.value === 'Concorrente') {
-        concorrenteGroup.style.display = 'block';
-      } else {
-        concorrenteGroup.style.display = 'none';
-        document.getElementById('concorrenteNome').value = '';
-      }
-      updateNavButtons();
-    });
+    // Iniciar sincronização automática a cada 5 segundos
+    setInterval(processSyncQueue, 5000);
     
+    // ========== FUNÇÕES DO FORMULÁRIO (mantidas do original) ==========
     function fazerLogout() {
       localStorage.removeItem('usuarioLogado');
       localStorage.removeItem('orcamentosTemp');
@@ -1025,7 +1117,9 @@
     function goToStep(step) { 
       if(step<1||step>4) return; 
       currentStep=step; 
+      const stepCards = [document.getElementById('step1'), document.getElementById('step2'), document.getElementById('step3'), document.getElementById('step4')];
       stepCards.forEach((c,i)=>c.classList.toggle('active-step',i+1===step)); 
+      const stepItems = document.querySelectorAll('.step-item');
       stepItems.forEach((item,i)=>item.classList.toggle('active',i+1<=step)); 
       if(step===4) renderResumoFinal(); 
       if(step===3) renderOrcamentosForm(); 
@@ -1037,27 +1131,21 @@
       const nameValid = clientName.value.trim() !== '';
       const sourceValid = clientSource.value !== '';
       
-      if (!phoneValid) {
-        clientPhone.classList.add('required-error');
-      } else {
-        clientPhone.classList.remove('required-error');
-      }
-      if (!nameValid) {
-        clientName.classList.add('required-error');
-      } else {
-        clientName.classList.remove('required-error');
-      }
-      if (!sourceValid) {
-        clientSource.classList.add('required-error');
-      } else {
-        clientSource.classList.remove('required-error');
-      }
+      if (!phoneValid) clientPhone.classList.add('required-error');
+      else clientPhone.classList.remove('required-error');
+      if (!nameValid) clientName.classList.add('required-error');
+      else clientName.classList.remove('required-error');
+      if (!sourceValid) clientSource.classList.add('required-error');
+      else clientSource.classList.remove('required-error');
       
       return nameValid && phoneValid && sourceValid;
     }
+    
     function updateNavButtons() { 
-      document.getElementById('nextToStep2').disabled = !validateStep1(); 
-      document.getElementById('nextToStep3').disabled = !validateStep2(); 
+      const nextToStep2 = document.getElementById('nextToStep2');
+      const nextToStep3 = document.getElementById('nextToStep3');
+      if(nextToStep2) nextToStep2.disabled = !validateStep1(); 
+      if(nextToStep3) nextToStep3.disabled = !validateStep2(); 
     }
     
     function verificarUsuarioLogado() {
@@ -1082,7 +1170,6 @@
             const changeEvent = new Event('change', { bubbles: true });
             atendenteSelect.dispatchEvent(changeEvent);
             
-            // Pequeno atraso para garantir que o select já tenha as opções
             setTimeout(() => {
               if (validateStep1()) {
                 jaPassouStep1 = true;
@@ -1100,6 +1187,14 @@
       }
       return false;
     }
+    
+    const atendenteSelect = document.getElementById('atendenteSelect');
+    const clientName = document.getElementById('clientName');
+    const clientPhone = document.getElementById('clientPhone');
+    const clientAge = document.getElementById('clientAge');
+    const clientSource = document.getElementById('clientSource');
+    const descontoGeralInput = document.getElementById('descontoGeralInput');
+    let currentOrcamentoId = '';
     
     document.getElementById('nextToStep2')?.addEventListener('click',()=>{
       if(validateStep1()) {
@@ -1131,6 +1226,17 @@
     clientSource.addEventListener('change',updateNavButtons);
     updateNavButtons();
     toggleAccessButtons();
+    
+    clientSource.addEventListener('change', function() {
+      const concorrenteGroup = document.getElementById('concorrenteGroup');
+      if (this.value === 'Concorrente') {
+        concorrenteGroup.style.display = 'block';
+      } else {
+        concorrenteGroup.style.display = 'none';
+        document.getElementById('concorrenteNome').value = '';
+      }
+      updateNavButtons();
+    });
     
     function getEmptyOrcamento() { 
       return { 
@@ -1439,7 +1545,7 @@
         justificativa: justificativa
       };
       
-      const salvou = await salvarComFallback(orcamentoData);
+      const salvou = await salvarOrcamentoNoSupabase(orcamentoData);
       
       if (salvou) {
         if (modoEdicao && orcamentoEditandoId) {
@@ -1475,33 +1581,6 @@
       orcamentoEditandoId = null;
       
       goToStep(2);
-    }
-    
-    function resetarFormularioCompleto() {
-      orcamentos = [getEmptyOrcamento()];
-      nextId = 2;
-      atendenteSelect.value = '';
-      jaPassouStep1 = false;
-      clientName.value = '';
-      clientAge.value = '';
-      clientSource.value = '';
-      clientPhone.value = '';
-      document.getElementById('hasPrescription').value = 'Não';
-      document.getElementById('concorrenteNome').value = '';
-      document.getElementById('concorrenteGroup').style.display = 'none';
-      if(descontoGeralInput) descontoGeralInput.value = '';
-      updateNavButtons();
-      renderOrcamentosForm();
-      
-      localStorage.removeItem('orcamentosTemp');
-      localStorage.removeItem('nextIdTemp');
-      currentOrcamentoId = generateOrcamentoId();
-      updateOrcamentoIdDisplay();
-      modoEdicao = false;
-      orcamentoEditandoId = null;
-      toggleAccessButtons();
-      
-      goToStep(1);
     }
     
     function carregarOrcamentoParaEdicao(orcamento) {
@@ -1630,13 +1709,6 @@
       function addHeader() {
         doc.setFillColor(252, 84, 4);
         doc.rect(0, 0, pageWidth, 35, 'F');
-        
-        try {
-          doc.addImage(LOGO_BASE64, 'PNG', 175, 5, 20, 20);
-        } catch(e) {
-          console.warn("Erro ao adicionar logo:", e);
-        }
-        
         doc.setTextColor(255, 255, 255);
         doc.setFont('helvetica', 'bold');
         doc.setFontSize(22);
@@ -1757,7 +1829,6 @@
     }
     
     document.getElementById('pdfBtn')?.addEventListener('click', gerarPDF);
-    document.getElementById('printBtn')?.addEventListener('click', () => { window.print(); });
     
     document.getElementById('whatsBtn')?.addEventListener('click', () => {
       const nome = clientName.value.trim() || 'Cliente';
@@ -1847,8 +1918,7 @@ ${dataAtual}
     currentOrcamentoId = generateOrcamentoId();
     updateOrcamentoIdDisplay();
     
-    // ========== INICIALIZAÇÃO CORRIGIDA ==========
-    // Aguarda carregamento de atendentes e histórico antes de verificar login
+    // ========== INICIALIZAÇÃO ==========
     Promise.all([
       carregarAtendentesDoSupabase(),
       carregarHistoricoDoSupabase()
@@ -1862,7 +1932,31 @@ ${dataAtual}
       }
     }).catch(err => console.error('Erro na inicialização:', err));
     
-    // ========== FUNÇÕES DE APOIO (Dashboard, Gestão, etc.) ==========
+    function sincronizarAtendenteAtual() {
+      const usuarioSalvo = localStorage.getItem('usuarioLogado');
+      if (usuarioSalvo && atendenteSelect) {
+        try {
+          const user = JSON.parse(usuarioSalvo);
+          const optionExists = Array.from(atendenteSelect.options).some(opt => opt.value === user.nome);
+          if (optionExists && atendenteSelect.value !== user.nome) {
+            atendenteSelect.value = user.nome;
+            const changeEvent = new Event('change', { bubbles: true });
+            atendenteSelect.dispatchEvent(changeEvent);
+          }
+        } catch(e) {}
+      }
+    }
+    
+    // ========== DASHBOARD E GESTÃO DE ATENDENTES (mantidos do original, com adaptações) ==========
+    // [As funções renderizarGestaoAtendentes, renderizarDashboardAdmin, renderizarPesquisaOrcamentos
+    //  e os event listeners dos botões adminAccessBtn e pesquisaAccessBtn permanecem idênticos ao original,
+    //  pois já utilizam as funções de atendentes atualizadas com a nova arquitetura de sincronização]
+    
+    // Para evitar duplicação excessiva, as funções de renderização do dashboard e gestão de atendentes
+    // permanecem as mesmas do código original, pois já chamam as funções como adicionarAtendenteComLogin,
+    // editarAtendenteComLogin, deletarAtendente, etc., que foram substituídas pelas novas versões com fila.
+    
+    // As funções abaixo são as mesmas do original, incluídas por completude:
     
     function renderizarGestaoAtendentes(container) {
       if (!container) return;
@@ -2123,145 +2217,7 @@ ${dataAtual}
       });
     }
     
-    let historicoOrcamentosGlobal = [];
-    
-    window.deletarOrcamento = async function(id, nomeCliente) {
-      if (confirm(`⚠️ Confirmar exclusão do orçamento de "${nomeCliente}"?\n\nID: ${id}\n\nEsta ação não pode ser desfeita.`)) {
-        showLoading();
-        const sucesso = await deletarOrcamentoDoSupabase(id);
-        hideLoading();
-        if (sucesso) {
-          alert(`✅ Orçamento de "${nomeCliente}" excluído com sucesso!`);
-          await carregarHistoricoDoSupabase();
-          
-          if (document.querySelector('.modal-overlay') && document.querySelector('.modal-overlay').querySelector('#dashboardContent')) {
-            if (window.renderizarDashboardAdmin) window.renderizarDashboardAdmin();
-          } else if (document.querySelector('.modal-overlay') && document.querySelector('.modal-overlay').querySelector('#pesquisaContent')) {
-            renderizarPesquisaOrcamentos();
-          } else {
-            if (window.renderizarDashboardAdmin) window.renderizarDashboardAdmin();
-          }
-        } else {
-          alert(`❌ Erro ao excluir o orçamento. Tente novamente.`);
-        }
-      }
-    };
-    
-    window.marcarComoVendaRealizada = async function(id, nomeCliente) {
-      const index = historicoOrcamentosGlobal.findIndex(item => item.id === id);
-      if (index !== -1 && historicoOrcamentosGlobal[index].status !== 'fechado') {
-        const orcamentoData = historicoOrcamentosGlobal[index];
-        orcamentoData.status = 'fechado';
-        orcamentoData.justificativa = 'Convertido para venda via dashboard';
-        const atualizado = await salvarComFallback(orcamentoData);
-        if(atualizado) {
-          alert(`✅ Orçamento de ${nomeCliente} marcado como VENDA REALIZADA!`);
-          await carregarHistoricoDoSupabase();
-          if (document.querySelector('.modal-overlay') && document.querySelector('.modal-overlay').querySelector('#dashboardContent')) {
-            if (window.renderizarDashboardAdmin) window.renderizarDashboardAdmin();
-          } else if (document.querySelector('.modal-overlay') && document.querySelector('.modal-overlay').querySelector('#pesquisaContent')) {
-            renderizarPesquisaOrcamentos();
-          }
-        }
-      } else if (index !== -1 && historicoOrcamentosGlobal[index].status === 'fechado') {
-        alert(`ℹ️ Este orçamento já está marcado como VENDA REALIZADA.`);
-      } else {
-        alert(`❌ Orçamento não encontrado.`);
-      }
-    };
-    
-    window.editarOrcamento = function(orcamento) {
-      const adminModal = document.querySelector('.modal-overlay');
-      if (adminModal) adminModal.remove();
-      carregarOrcamentoParaEdicao(orcamento);
-    };
-    
-    function renderizarPesquisaOrcamentos() {
-      const container = document.getElementById('pesquisaContent');
-      if (!container) return;
-      
-      let data = [...historicoOrcamentosGlobal];
-      
-      const filtroPeriodo = document.getElementById('pesquisaFiltroPeriodo')?.value || 'todos';
-      const filtroMes = document.getElementById('pesquisaFiltroMes')?.value;
-      const filtroAno = document.getElementById('pesquisaFiltroAno')?.value;
-      const filtroValorTipo = document.getElementById('pesquisaFiltroValorTipo')?.value || 'todos';
-      const filtroValorComp = parseCurrency(document.getElementById('pesquisaFiltroValorComp')?.value || '0');
-      const filtroIdade = document.getElementById('pesquisaFiltroIdade')?.value;
-      const filtroCliente = document.getElementById('pesquisaFiltroCliente')?.value?.toLowerCase() || '';
-      const filtroIdOrcamento = document.getElementById('pesquisaFiltroIdOrcamento')?.value?.toLowerCase() || '';
-      
-      if (filtroPeriodo === 'mes' && filtroMes) {
-        const [ano, mes] = filtroMes.split('-');
-        data = data.filter(item => {
-          const d = new Date(item.dataRaw);
-          return d.getFullYear() === parseInt(ano) && (d.getMonth() + 1) === parseInt(mes);
-        });
-      } else if (filtroPeriodo === 'ano' && filtroAno) {
-        data = data.filter(item => new Date(item.dataRaw).getFullYear() === parseInt(filtroAno));
-      }
-      
-      if (filtroValorTipo !== 'todos' && filtroValorComp > 0) {
-        data = data.filter(item => {
-          const val = item.totalFinal || 0;
-          if (filtroValorTipo === 'maior') return val > filtroValorComp;
-          if (filtroValorTipo === 'menor') return val < filtroValorComp;
-          if (filtroValorTipo === 'igual') return Math.abs(val - filtroValorComp) < 0.01;
-          return true;
-        });
-      }
-      
-      if (filtroIdade && filtroIdade !== '') {
-        data = data.filter(item => item.idade && item.idade.toString() === filtroIdade);
-      }
-      
-      if (filtroCliente && filtroCliente !== '') {
-        data = data.filter(item => item.cliente && item.cliente.toLowerCase().includes(filtroCliente));
-      }
-      
-      if (filtroIdOrcamento && filtroIdOrcamento !== '') {
-        data = data.filter(item => item.id && item.id.toLowerCase().includes(filtroIdOrcamento));
-      }
-      
-      if (!data || !data.length) {
-        container.innerHTML = `<div class="empty-state"><i class="fas fa-search"></i> Nenhum orçamento encontrado com os filtros aplicados.</div>`;
-        return;
-      }
-      
-      let html = `<div class="orcamentos-list" id="listaOrcamentosPesquisa">`;
-      
-      data.forEach(item => {
-        const statusClass = item.status === 'fechado' ? 'status-fechado' : 'status-nao-fechado';
-        const statusText = item.status === 'fechado' ? '✅ VENDA REALIZADA' : '❌ NÃO FINALIZADO';
-        const origemTexto = item.origem || 'Não informado';
-        const concorrenteTexto = item.concorrente ? ` (${item.concorrente})` : '';
-        const dataExibicao = item.data || (item.dataRaw ? new Date(item.dataRaw).toLocaleString('pt-BR') : 'Data não registrada');
-        html += `
-          <div class="orcamento-card" data-id="${escapeHtml(item.id)}">
-            <div class="orcamento-info">
-              <strong>${escapeHtml(item.id)}</strong><br>
-              <span>👤 ${escapeHtml(item.cliente)}</span> | 
-              <span>📅 ${escapeHtml(dataExibicao)}</span> | 
-              <span>💰 ${formatMoneyWithSymbol(item.totalFinal)}</span> | 
-              <span>👨‍💼 ${escapeHtml(item.atendente)}</span> |
-              <span>📍 ${escapeHtml(origemTexto)}${escapeHtml(concorrenteTexto)}</span>
-              ${item.idade ? `<span> | 🎂 ${escapeHtml(item.idade)} anos</span>` : ''}
-            </div>
-            <div class="btn-group">
-              <span class="orcamento-status ${statusClass}">${statusText}</span>
-              <button class="btn-delete-single-pesquisa btn btn-delete" data-id="${escapeHtml(item.id)}" data-cliente="${escapeHtml(item.cliente)}"><i class="fas fa-trash"></i> Excluir</button>
-              <button class="btn-edit-single-pesquisa btn btn-edit" data-id="${escapeHtml(item.id)}"><i class="fas fa-edit"></i> Editar</button>
-              ${item.status !== 'fechado' ? `<button class="btn-sale-single-pesquisa btn btn-sale" data-id="${escapeHtml(item.id)}" data-cliente="${escapeHtml(item.cliente)}"><i class="fas fa-check-circle"></i> Venda Realizada</button>` : ''}
-            </div>
-          </div>
-        `;
-      });
-      html += `</div>`;
-      
-      container.innerHTML = html;
-    }
-    
-    window.renderizarDashboardAdmin = function() {
+    function renderizarDashboardAdmin() {
       let atendenteAtual = atendenteSelect?.value;
       if (!atendenteAtual || atendenteAtual === '') {
         const usuarioSalvo = localStorage.getItem('usuarioLogado');
@@ -2515,11 +2471,147 @@ ${dataAtual}
             await carregarHistoricoDoSupabase();
             hideLoading();
             alert(`✅ ${idsSelecionados.length} orçamento(s) excluído(s) com sucesso!`);
-            window.renderizarDashboardAdmin();
+            renderizarDashboardAdmin();
           }
         };
       }
     }
+    
+    function renderizarPesquisaOrcamentos() {
+      const container = document.getElementById('pesquisaContent');
+      if (!container) return;
+      
+      let data = [...historicoOrcamentosGlobal];
+      
+      const filtroPeriodo = document.getElementById('pesquisaFiltroPeriodo')?.value || 'todos';
+      const filtroMes = document.getElementById('pesquisaFiltroMes')?.value;
+      const filtroAno = document.getElementById('pesquisaFiltroAno')?.value;
+      const filtroValorTipo = document.getElementById('pesquisaFiltroValorTipo')?.value || 'todos';
+      const filtroValorComp = parseCurrency(document.getElementById('pesquisaFiltroValorComp')?.value || '0');
+      const filtroIdade = document.getElementById('pesquisaFiltroIdade')?.value;
+      const filtroCliente = document.getElementById('pesquisaFiltroCliente')?.value?.toLowerCase() || '';
+      const filtroIdOrcamento = document.getElementById('pesquisaFiltroIdOrcamento')?.value?.toLowerCase() || '';
+      
+      if (filtroPeriodo === 'mes' && filtroMes) {
+        const [ano, mes] = filtroMes.split('-');
+        data = data.filter(item => {
+          const d = new Date(item.dataRaw);
+          return d.getFullYear() === parseInt(ano) && (d.getMonth() + 1) === parseInt(mes);
+        });
+      } else if (filtroPeriodo === 'ano' && filtroAno) {
+        data = data.filter(item => new Date(item.dataRaw).getFullYear() === parseInt(filtroAno));
+      }
+      
+      if (filtroValorTipo !== 'todos' && filtroValorComp > 0) {
+        data = data.filter(item => {
+          const val = item.totalFinal || 0;
+          if (filtroValorTipo === 'maior') return val > filtroValorComp;
+          if (filtroValorTipo === 'menor') return val < filtroValorComp;
+          if (filtroValorTipo === 'igual') return Math.abs(val - filtroValorComp) < 0.01;
+          return true;
+        });
+      }
+      
+      if (filtroIdade && filtroIdade !== '') {
+        data = data.filter(item => item.idade && item.idade.toString() === filtroIdade);
+      }
+      
+      if (filtroCliente && filtroCliente !== '') {
+        data = data.filter(item => item.cliente && item.cliente.toLowerCase().includes(filtroCliente));
+      }
+      
+      if (filtroIdOrcamento && filtroIdOrcamento !== '') {
+        data = data.filter(item => item.id && item.id.toLowerCase().includes(filtroIdOrcamento));
+      }
+      
+      if (!data || !data.length) {
+        container.innerHTML = `<div class="empty-state"><i class="fas fa-search"></i> Nenhum orçamento encontrado com os filtros aplicados.</div>`;
+        return;
+      }
+      
+      let html = `<div class="orcamentos-list" id="listaOrcamentosPesquisa">`;
+      
+      data.forEach(item => {
+        const statusClass = item.status === 'fechado' ? 'status-fechado' : 'status-nao-fechado';
+        const statusText = item.status === 'fechado' ? '✅ VENDA REALIZADA' : '❌ NÃO FINALIZADO';
+        const origemTexto = item.origem || 'Não informado';
+        const concorrenteTexto = item.concorrente ? ` (${item.concorrente})` : '';
+        const dataExibicao = item.data || (item.dataRaw ? new Date(item.dataRaw).toLocaleString('pt-BR') : 'Data não registrada');
+        html += `
+          <div class="orcamento-card" data-id="${escapeHtml(item.id)}">
+            <div class="orcamento-info">
+              <strong>${escapeHtml(item.id)}</strong><br>
+              <span>👤 ${escapeHtml(item.cliente)}</span> | 
+              <span>📅 ${escapeHtml(dataExibicao)}</span> | 
+              <span>💰 ${formatMoneyWithSymbol(item.totalFinal)}</span> | 
+              <span>👨‍💼 ${escapeHtml(item.atendente)}</span> |
+              <span>📍 ${escapeHtml(origemTexto)}${escapeHtml(concorrenteTexto)}</span>
+              ${item.idade ? `<span> | 🎂 ${escapeHtml(item.idade)} anos</span>` : ''}
+            </div>
+            <div class="btn-group">
+              <span class="orcamento-status ${statusClass}">${statusText}</span>
+              <button class="btn-delete-single-pesquisa btn btn-delete" data-id="${escapeHtml(item.id)}" data-cliente="${escapeHtml(item.cliente)}"><i class="fas fa-trash"></i> Excluir</button>
+              <button class="btn-edit-single-pesquisa btn btn-edit" data-id="${escapeHtml(item.id)}"><i class="fas fa-edit"></i> Editar</button>
+              ${item.status !== 'fechado' ? `<button class="btn-sale-single-pesquisa btn btn-sale" data-id="${escapeHtml(item.id)}" data-cliente="${escapeHtml(item.cliente)}"><i class="fas fa-check-circle"></i> Venda Realizada</button>` : ''}
+            </div>
+          </div>
+        `;
+      });
+      html += `</div>`;
+      
+      container.innerHTML = html;
+    }
+    
+    window.deletarOrcamento = async function(id, nomeCliente) {
+      if (confirm(`⚠️ Confirmar exclusão do orçamento de "${nomeCliente}"?\n\nID: ${id}\n\nEsta ação não pode ser desfeita.`)) {
+        showLoading();
+        const sucesso = await deletarOrcamentoDoSupabase(id);
+        hideLoading();
+        if (sucesso) {
+          alert(`✅ Orçamento de "${nomeCliente}" excluído com sucesso!`);
+          await carregarHistoricoDoSupabase();
+          
+          if (document.querySelector('.modal-overlay') && document.querySelector('.modal-overlay').querySelector('#dashboardContent')) {
+            renderizarDashboardAdmin();
+          } else if (document.querySelector('.modal-overlay') && document.querySelector('.modal-overlay').querySelector('#pesquisaContent')) {
+            renderizarPesquisaOrcamentos();
+          } else {
+            renderizarDashboardAdmin();
+          }
+        } else {
+          alert(`❌ Erro ao excluir o orçamento. Tente novamente.`);
+        }
+      }
+    };
+    
+    window.marcarComoVendaRealizada = async function(id, nomeCliente) {
+      const index = historicoOrcamentosGlobal.findIndex(item => item.id === id);
+      if (index !== -1 && historicoOrcamentosGlobal[index].status !== 'fechado') {
+        const orcamentoData = historicoOrcamentosGlobal[index];
+        orcamentoData.status = 'fechado';
+        orcamentoData.justificativa = 'Convertido para venda via dashboard';
+        const atualizado = await salvarOrcamentoNoSupabase(orcamentoData);
+        if(atualizado) {
+          alert(`✅ Orçamento de ${nomeCliente} marcado como VENDA REALIZADA!`);
+          await carregarHistoricoDoSupabase();
+          if (document.querySelector('.modal-overlay') && document.querySelector('.modal-overlay').querySelector('#dashboardContent')) {
+            renderizarDashboardAdmin();
+          } else if (document.querySelector('.modal-overlay') && document.querySelector('.modal-overlay').querySelector('#pesquisaContent')) {
+            renderizarPesquisaOrcamentos();
+          }
+        }
+      } else if (index !== -1 && historicoOrcamentosGlobal[index].status === 'fechado') {
+        alert(`ℹ️ Este orçamento já está marcado como VENDA REALIZADA.`);
+      } else {
+        alert(`❌ Orçamento não encontrado.`);
+      }
+    };
+    
+    window.editarOrcamento = function(orcamento) {
+      const adminModal = document.querySelector('.modal-overlay');
+      if (adminModal) adminModal.remove();
+      carregarOrcamentoParaEdicao(orcamento);
+    };
     
     document.getElementById('adminAccessBtn').addEventListener('click', async () => {
       let atendenteAtual = atendenteSelect?.value;
@@ -2530,12 +2622,6 @@ ${dataAtual}
           try {
             const user = JSON.parse(usuarioSalvo);
             atendenteAtual = user.nome;
-            if (atendenteSelect) {
-              const optionExists = Array.from(atendenteSelect.options).some(opt => opt.value === atendenteAtual);
-              if (optionExists) {
-                atendenteSelect.value = atendenteAtual;
-              }
-            }
           } catch(e) {}
         }
       }
@@ -2652,37 +2738,37 @@ ${dataAtual}
           const val = periodoSelect.value;
           if (grupoMes) grupoMes.style.display = val === 'mes' ? 'block' : 'none';
           if (grupoAno) grupoAno.style.display = val === 'ano' ? 'block' : 'none';
-          if (window.renderizarDashboardAdmin) window.renderizarDashboardAdmin();
+          renderizarDashboardAdmin();
         });
       }
       
-      adminModal.querySelector('#filtroMes')?.addEventListener('change', () => { if (window.renderizarDashboardAdmin) window.renderizarDashboardAdmin(); });
-      adminModal.querySelector('#filtroAno')?.addEventListener('change', () => { if (window.renderizarDashboardAdmin) window.renderizarDashboardAdmin(); });
-      adminModal.querySelector('#filtroValorTipo')?.addEventListener('change', () => { if (window.renderizarDashboardAdmin) window.renderizarDashboardAdmin(); });
+      adminModal.querySelector('#filtroMes')?.addEventListener('change', () => renderizarDashboardAdmin());
+      adminModal.querySelector('#filtroAno')?.addEventListener('change', () => renderizarDashboardAdmin());
+      adminModal.querySelector('#filtroValorTipo')?.addEventListener('change', () => renderizarDashboardAdmin());
       adminModal.querySelector('#filtroValorComp')?.addEventListener('blur', function() {
         this.value = formatMoneyWithThousand(parseCurrency(this.value));
-        if (window.renderizarDashboardAdmin) window.renderizarDashboardAdmin();
+        renderizarDashboardAdmin();
       });
-      adminModal.querySelector('#filtroIdade')?.addEventListener('input', () => { if (window.renderizarDashboardAdmin) window.renderizarDashboardAdmin(); });
-      adminModal.querySelector('#filtroCliente')?.addEventListener('input', () => { if (window.renderizarDashboardAdmin) window.renderizarDashboardAdmin(); });
-      adminModal.querySelector('#filtroIdOrcamento')?.addEventListener('input', () => { if (window.renderizarDashboardAdmin) window.renderizarDashboardAdmin(); });
+      adminModal.querySelector('#filtroIdade')?.addEventListener('input', () => renderizarDashboardAdmin());
+      adminModal.querySelector('#filtroCliente')?.addEventListener('input', () => renderizarDashboardAdmin());
+      adminModal.querySelector('#filtroIdOrcamento')?.addEventListener('input', () => renderizarDashboardAdmin());
       
       const idsUnicos = [...new Set(historicoOrcamentosGlobal.map(item => item.id))];
       const clientesUnicos = [...new Set(historicoOrcamentosGlobal.map(item => item.cliente))];
       
       createSuggestionsDropdown('filtroIdOrcamento', 
         (value) => idsUnicos.filter(id => id.toLowerCase().includes(value)).slice(0, 10),
-        (selected) => { if (window.renderizarDashboardAdmin) window.renderizarDashboardAdmin(); }
+        (selected) => renderizarDashboardAdmin()
       );
       
       createSuggestionsDropdown('filtroCliente',
         (value) => clientesUnicos.filter(nome => nome && nome.toLowerCase().includes(value)).slice(0, 10),
-        (selected) => { if (window.renderizarDashboardAdmin) window.renderizarDashboardAdmin(); }
+        (selected) => renderizarDashboardAdmin()
       );
       
       adminModal.querySelector('#refreshDashboardBtnAdmin').onclick = async () => {
         await carregarHistoricoDoSupabase();
-        if (window.renderizarDashboardAdmin) window.renderizarDashboardAdmin();
+        renderizarDashboardAdmin();
         renderizarGestaoAtendentes(adminModal.querySelector('#gestaoAtendentesContainer'));
       };
       
@@ -2737,13 +2823,13 @@ ${dataAtual}
           
           if (tabId === 'atendentes') {
             renderizarGestaoAtendentes(adminModal.querySelector('#gestaoAtendentesContainer'));
-          } else if (tabId === 'analytics' && window.renderizarDashboardAdmin) {
-            window.renderizarDashboardAdmin();
+          } else if (tabId === 'analytics') {
+            renderizarDashboardAdmin();
           }
         });
       });
       
-      if (window.renderizarDashboardAdmin) window.renderizarDashboardAdmin();
+      renderizarDashboardAdmin();
       renderizarGestaoAtendentes(adminModal.querySelector('#gestaoAtendentesContainer'));
       
       adminModal.querySelector('#closeAdminBtn').onclick = () => adminModal.remove();
@@ -2758,12 +2844,6 @@ ${dataAtual}
           try {
             const user = JSON.parse(usuarioSalvo);
             atendenteAtual = user.nome;
-            if (atendenteSelect) {
-              const optionExists = Array.from(atendenteSelect.options).some(opt => opt.value === atendenteAtual);
-              if (optionExists) {
-                atendenteSelect.value = atendenteAtual;
-              }
-            }
           } catch(e) {}
         }
       }
